@@ -13,6 +13,27 @@ import {
 } from '@/lib/auth-api'
 import { useAuthStore } from '@/lib/auth-store'
 
+/**
+ * Routes server-side field errors onto the matching form inputs.
+ * Maps backend payload field names (pydantic) to this dialog's input ids.
+ * Returns true when at least one field error was placed on an input.
+ */
+function applyServerFieldErrors(
+  err: unknown,
+  map: Record<string, string>,
+  setFieldErrors: React.Dispatch<React.SetStateAction<Record<string, string>>>,
+): boolean {
+  if (!(err instanceof AuthApiError) || err.fieldErrors.length === 0) return false
+  const mapped: Record<string, string> = {}
+  for (const issue of err.fieldErrors) {
+    const target = map[issue.field]
+    if (target && !mapped[target]) mapped[target] = issue.message
+  }
+  if (Object.keys(mapped).length === 0) return false
+  setFieldErrors((prev) => ({ ...prev, ...mapped }))
+  return true
+}
+
 export type AuthMode = 'login' | 'signup'
 export type AuthScreen = AuthMode | 'signup-otp' | 'forgot' | 'reset-otp'
 
@@ -215,7 +236,12 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
         await finishSession(token)
       }
     } catch (err) {
-      setFormError(toMessage(err))
+      const fieldMap = isSignup
+        ? { email: 'auth-email', password: 'auth-password', confirm_password: 'signup-confirm' }
+        : { email: 'auth-email', password: 'auth-password' }
+      if (!applyServerFieldErrors(err, fieldMap, setFieldErrors)) {
+        setFormError(toMessage(err))
+      }
     } finally {
       setSubmitting(false)
     }
@@ -235,7 +261,9 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
       const token = await verifySignupOtp(pendingEmail, otp)
       await finishSession(token)
     } catch (err) {
-      setFormError(toMessage(err))
+      if (!applyServerFieldErrors(err, { otp: 'signup-otp', email: 'auth-email' }, setFieldErrors)) {
+        setFormError(toMessage(err))
+      }
     } finally {
       setSubmitting(false)
     }
@@ -269,7 +297,9 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
       setSentTo(email)
       // Stay on 'forgot': the success panel renders via the forgotSent flag.
     } catch (err) {
-      setFormError(toMessage(err))
+      if (!applyServerFieldErrors(err, { email: 'forgot-email' }, setFieldErrors)) {
+        setFormError(toMessage(err))
+      }
     } finally {
       setSubmitting(false)
     }
@@ -298,7 +328,15 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
       await resetPassword(sentTo, otp, newPassword)
       setResetComplete(true)
     } catch (err) {
-      setFormError(toMessage(err))
+      if (
+        !applyServerFieldErrors(
+          err,
+          { otp: 'reset-otp', new_password: 'reset-password', email: 'forgot-email' },
+          setFieldErrors,
+        )
+      ) {
+        setFormError(toMessage(err))
+      }
     } finally {
       setSubmitting(false)
     }

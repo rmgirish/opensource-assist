@@ -8,12 +8,22 @@
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, '')
 
+export interface FieldValidationIssue {
+  /** Backend field name (e.g. "email", "password", "confirm_password", "otp"). */
+  field: string
+  /** Human-readable message, with the pydantic "Value error, " prefix stripped. */
+  message: string
+}
+
 export class AuthApiError extends Error {
   readonly status: number
-  constructor(message: string, status: number) {
+  /** Populated when the backend returned field-level validation errors (FastAPI 422). */
+  readonly fieldErrors: FieldValidationIssue[]
+  constructor(message: string, status: number, fieldErrors: FieldValidationIssue[] = []) {
     super(message)
     this.name = 'AuthApiError'
     this.status = status
+    this.fieldErrors = fieldErrors
   }
 }
 
@@ -50,6 +60,26 @@ export function clearToken(): void {
   }
 }
 
+interface FastApiValidationItem {
+  loc: (string | number)[]
+  msg: string
+  type?: string
+}
+
+function isValidationArray(value: unknown): value is FastApiValidationItem[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (item) =>
+        typeof item === 'object' &&
+        item !== null &&
+        Array.isArray((item as FastApiValidationItem).loc) &&
+        typeof (item as FastApiValidationItem).msg === 'string',
+    )
+  )
+}
+
 async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   let res: Response
   try {
@@ -64,14 +94,29 @@ async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): P
     throw new BackendUnavailableError()
   }
   if (!res.ok) {
-    let detail = `Request failed (${res.status}).`
+    let detail: unknown
     try {
-      const data = (await res.json()) as { detail?: unknown }
-      if (typeof data.detail === 'string') detail = data.detail
+      detail = ((await res.json()) as { detail?: unknown }).detail
     } catch {
-      // non-JSON error body: keep the generic message
+      // non-JSON error body: keep detail undefined
     }
-    throw new AuthApiError(detail, res.status)
+
+    if (typeof detail === 'string') {
+      throw new AuthApiError(detail, res.status)
+    }
+    // FastAPI 422 responses carry per-field validation errors.
+    if (isValidationArray(detail)) {
+      const fieldErrors: FieldValidationIssue[] = detail.map((item) => {
+        const last = item.loc[item.loc.length - 1]
+        return {
+          field: typeof last === 'string' ? last : String(last),
+          message: item.msg.replace(/^Value error,\s*/i, '').replace(/^Assertion failed,\s*/i, ''),
+        }
+      })
+      const summary = fieldErrors.map((e) => e.message).join(' ')
+      throw new AuthApiError(summary || `Request failed (${res.status}).`, res.status, fieldErrors)
+    }
+    throw new AuthApiError(`Request failed (${res.status}).`, res.status)
   }
   return (await res.json()) as T
 }
