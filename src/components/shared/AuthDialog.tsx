@@ -236,7 +236,7 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
         await finishSession(token)
       }
     } catch (err) {
-      const fieldMap = isSignup
+      const fieldMap: Record<string, string> = isSignup
         ? { email: 'auth-email', password: 'auth-password', confirm_password: 'signup-confirm' }
         : { email: 'auth-email', password: 'auth-password' }
       if (!applyServerFieldErrors(err, fieldMap, setFieldErrors)) {
