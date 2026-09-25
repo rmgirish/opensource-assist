@@ -96,3 +96,7 @@ $RECYCLE.BIN/
 *.iws
 *.iml
 *.ipr
+
+# Local dev database
+osa_local.db
+*.sqlite3
