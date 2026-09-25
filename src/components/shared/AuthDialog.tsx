@@ -16,6 +16,8 @@ import { useAuthStore } from '@/lib/auth-store'
 /**
  * Routes server-side field errors onto the matching form inputs.
  * Maps backend payload field names (pydantic) to this dialog's input ids.
+ * Also routes known string-detail 400s (duplicate email, wrong OTP, password
+ * mismatch) onto the field they belong to, by keyword.
  * Returns true when at least one field error was placed on an input.
  */
 function applyServerFieldErrors(
@@ -23,12 +25,29 @@ function applyServerFieldErrors(
   map: Record<string, string>,
   setFieldErrors: React.Dispatch<React.SetStateAction<Record<string, string>>>,
 ): boolean {
-  if (!(err instanceof AuthApiError) || err.fieldErrors.length === 0) return false
+  if (!(err instanceof AuthApiError)) return false
+
   const mapped: Record<string, string> = {}
-  for (const issue of err.fieldErrors) {
-    const target = map[issue.field]
-    if (target && !mapped[target]) mapped[target] = issue.message
+  if (err.fieldErrors.length > 0) {
+    for (const issue of err.fieldErrors) {
+      const target = map[issue.field]
+      if (target && !mapped[target]) mapped[target] = issue.message
+    }
+  } else if (err.status === 400) {
+    // Backend business-rule errors arrive as plain strings; route by keyword.
+    const msg = err.message.toLowerCase()
+    if (msg.includes('email')) {
+      const target = map['email']
+      if (target) mapped[target] = err.message
+    } else if (msg.includes('password')) {
+      const target = map['password'] ?? map['confirm_password']
+      if (target) mapped[target] = err.message
+    } else if (msg.includes('otp') || msg.includes('code')) {
+      const target = map['otp']
+      if (target) mapped[target] = err.message
+    }
   }
+
   if (Object.keys(mapped).length === 0) return false
   setFieldErrors((prev) => ({ ...prev, ...mapped }))
   return true
