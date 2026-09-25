@@ -28,6 +28,16 @@ from backend.schemas.chatbot import (
     StructuredChatbotOutput,
     ChatbotResponse,
 )
+from backend.schemas.auth import (
+    SignupRequest,
+    VerifySignupOTPRequest,
+    LoginRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    TokenResponse,
+    AuthResponse,
+    MessageResponse,
+)
 
 __all__ = [
     "RepoSearchFilter",
@@ -50,7 +60,12 @@ __all__ = [
     "ChatbotRequest",
     "StructuredChatbotOutput",
     "ChatbotResponse",
+    "SignupRequest",
+    "VerifySignupOTPRequest",
+    "LoginRequest",
+    "ForgotPasswordRequest",
+    "ResetPasswordRequest",
+    "TokenResponse",
+    "AuthResponse",
+    "MessageResponse",
 ]
-
-
-

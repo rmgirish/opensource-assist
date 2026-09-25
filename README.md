@@ -36,3 +36,21 @@ This module provides an asynchronous, high-throughput semantic search engine tha
   * Pydantic v2 models with explicit `Field` documentation for OpenAPI contract generation.
   * Built-in health check and cluster readiness probes.
 
+## Authentication
+
+The backend includes PostgreSQL-backed authentication routes under the versioned API prefix:
+
+* `POST /api/v1/auth/signup`
+* `POST /api/v1/auth/login`
+* `POST /api/v1/auth/forgot-password`
+* `POST /api/v1/auth/reset-password`
+
+Copy `.env.example` to `.env`, set `DATABASE_URL` and a long random `JWT_SECRET_KEY`, then apply the schema migration with:
+
+```powershell
+uv run alembic upgrade head
+uv run uvicorn backend.main:app --reload
+```
+
+Reset codes expire after five minutes, are persisted as HMAC digests, and are single-use. Email delivery is currently represented by the mock mailer in `backend/scripts/mailer.py`.
+

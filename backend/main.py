@@ -5,10 +5,12 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.core.config import settings
+from backend.core.database import engine
 from backend.services.qdrant_service import qdrant_service
 from backend.api.routes.search import router as search_router
 from backend.api.routes.learning import router as learning_router
 from backend.api.routes.chatbot import router as chatbot_router
+from backend.api.auth import router as auth_router
 
 
 @asynccontextmanager
@@ -23,8 +25,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
-    # Shutdown: Cleanly close client connections
+    # Shutdown: Cleanly close client connections and DB connection pool
     await qdrant_service.close()
+    await engine.dispose()
 
 
 app = FastAPI(
@@ -42,8 +45,8 @@ app = FastAPI(
 # CORS middleware for frontend React / Vite client
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip() for origin in settings.CORS_ALLOW_ORIGINS.split(",")],
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -52,6 +55,7 @@ app.add_middleware(
 app.include_router(search_router, prefix=settings.API_V1_PREFIX)
 app.include_router(learning_router, prefix=settings.API_V1_PREFIX)
 app.include_router(chatbot_router, prefix=settings.API_V1_PREFIX)
+app.include_router(auth_router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/health", tags=["Health"])
@@ -63,4 +67,9 @@ async def health_check() -> dict[str, str]:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "backend.main:app",
+        host=settings.SERVER_HOST,
+        port=settings.SERVER_PORT,
+        reload=settings.SERVER_RELOAD,
+    )

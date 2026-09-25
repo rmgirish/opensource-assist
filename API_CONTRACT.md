@@ -196,5 +196,47 @@ This document tracks all FastAPI endpoint contracts, request payloads, and respo
   }
   ```
 
+---
+
+## [v0.4.0] - 2026-09-24: Authentication & Verification Endpoints
+
+### 6. User Signup (Initiation)
+* **Endpoint**: `POST /api/v1/auth/signup`
+* **Status**: `200 OK`
+* **Request Body**: `{ "email": "user@example.com", "password": "password123", "confirm_password": "password123" }`
+* **Response Body**: `{ "message": "Verification code sent to your email" }`
+* **Description**: Validates payload and stages an ephemeral OTP. Does not create a user record in the primary `users` table until verified.
+
+### 7. Verify Signup OTP & Registration Finalization
+* **Endpoint**: `POST /api/v1/auth/verify-signup-otp`
+* **Status**: `201 Created`
+* **Request Body**: `{ "email": "user@example.com", "otp": "123456" }`
+* **Response Body**: `{ "access_token": "<jwt>", "token_type": "bearer", "message": "User registered and verified successfully" }`
+* **Description**: Verifies the 6-digit registration code, creates the verified user with UUID in PostgreSQL, consumes the OTP, and returns a signed bearer access token.
+
+### 8. User Login
+* **Endpoint**: `POST /api/v1/auth/login`
+* **Status**: `200 OK`
+* **Request Body**: `{ "email": "user@example.com", "password": "password123" }`
+* **Response Body**: `{ "access_token": "<jwt>", "token_type": "bearer" }`
+
+### 9. Request Password Reset
+* **Endpoint**: `POST /api/v1/auth/forgot-password`
+* **Status**: `200 OK`
+* **Request Body**: `{ "email": "user@example.com" }`
+* **Response Body**: `{ "message": "If the account exists, a reset code has been sent" }`
+
+### 10. Reset Password
+* **Endpoint**: `POST /api/v1/auth/reset-password`
+* **Status**: `200 OK`
+* **Request Body**: `{ "email": "user@example.com", "otp": "123456", "new_password": "newpassword123" }`
+* **Response Body**: `{ "message": "Password reset successfully" }`
+* OTPs expire after five minutes and can be redeemed only once.
+
+### 11. Current User Profile
+* **Endpoint**: `GET /api/v1/auth/me`
+* **Status**: `200 OK`
+* **Headers**: `Authorization: Bearer <jwt>`
+* **Response Body**: `{ "id": "<uuid>", "email": "user@example.com" }`
 
 
