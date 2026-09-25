@@ -14,7 +14,8 @@ interface AuthState {
   user: User | null
   /** True while a stored token is being validated against /auth/me. */
   status: 'idle' | 'loading'
-  setSession: (token: string, profile: UserProfile) => void
+  /** displayName: locally chosen username (the backend only stores email+password). */
+  setSession: (token: string, profile: UserProfile, displayName?: string) => void
   /** Validate a persisted token after refresh; safe to call on every mount. */
   hydrate: () => Promise<void>
   logout: () => void
@@ -34,7 +35,12 @@ function loadPersistedUser(): User | null {
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<User>
     if (typeof parsed.id === 'string' && typeof parsed.email === 'string') {
-      return { id: parsed.id, email: parsed.email, username: parsed.email.split('@')[0] || 'contributor' }
+      const derived = parsed.email.split('@')[0] || 'contributor'
+      return {
+        id: parsed.id,
+        email: parsed.email,
+        username: typeof parsed.username === 'string' && parsed.username ? parsed.username : derived,
+      }
     }
   } catch {
     // localStorage unavailable or corrupt: treat as logged out
@@ -60,9 +66,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: loadPersistedUser(),
   status: getStoredToken() ? 'loading' : 'idle',
 
-  setSession: (token, profile) => {
+  setSession: (token, profile, displayName) => {
     storeToken(token)
     const user = toUser(profile)
+    if (displayName && displayName.trim()) user.username = displayName.trim()
     persistUser(user)
     set({ user, status: 'idle' })
   },

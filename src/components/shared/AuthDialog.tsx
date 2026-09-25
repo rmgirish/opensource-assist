@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { ArrowLeft, ArrowRight, Check, GitBranch, KeyRound, LogIn, MailCheck, UserPlus } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, Eye, EyeOff, GitBranch, KeyRound, LogIn, MailCheck, UserPlus } from 'lucide-react'
 import { Dialog, Button, Input } from '@/components/ui'
 import {
   AuthApiError,
@@ -101,6 +101,56 @@ function Field(props: {
   )
 }
 
+/**
+ * Password input with a show/hide visibility toggle.
+ */
+function PasswordField(props: {
+  label: string
+  id: string
+  placeholder?: string
+  autoComplete?: string
+  error?: string | null
+  inputRef?: React.Ref<HTMLInputElement>
+}) {
+  const [visible, setVisible] = React.useState(false)
+  return (
+    <div className="space-y-1">
+      <label htmlFor={props.id} className="block text-[11px] font-semibold text-foreground">
+        {props.label}
+      </label>
+      <div className="relative">
+        <Input
+          ref={props.inputRef}
+          id={props.id}
+          name={props.id}
+          type={visible ? 'text' : 'password'}
+          placeholder={props.placeholder ?? '••••••••'}
+          autoComplete={props.autoComplete}
+          required
+          error={props.error}
+          className="pr-10"
+        />
+        <button
+          type="button"
+          onClick={() => setVisible((v) => !v)}
+          aria-label={visible ? 'Hide password' : 'Show password'}
+          aria-pressed={visible}
+          className="absolute right-1.5 top-1/2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-accent-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          {visible ? (
+            <EyeOff className="size-4" aria-hidden="true" />
+          ) : (
+            <Eye className="size-4" aria-hidden="true" />
+          )}
+        </button>
+      </div>
+      {props.error && (
+        <p className="animate-fade-in text-[11px] font-medium text-accent-text">{props.error}</p>
+      )}
+    </div>
+  )
+}
+
 function OtpField(props: {
   label: string
   id: string
@@ -168,6 +218,8 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
   const [pendingEmail, setPendingEmail] = React.useState('')
   /** Kept in memory (never persisted) so "resend code" can re-issue the signup OTP. */
   const pendingPasswordRef = React.useRef<string>('')
+  /** Chosen username, kept until the OTP step completes. */
+  const pendingUsernameRef = React.useRef<string>('')
 
   /** Forgot-password flow state. */
   const [sentTo, setSentTo] = React.useState<string | null>(null)
@@ -186,6 +238,7 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
       setSubmitting(false)
       setPendingEmail('')
       pendingPasswordRef.current = ''
+      pendingUsernameRef.current = ''
       setSentTo(null)
       setResetComplete(false)
     }
@@ -209,9 +262,9 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
     setScreen(next)
   }
 
-  const finishSession = async (token: string) => {
+  const finishSession = async (token: string, displayName?: string) => {
     const profile = await fetchProfile(token)
-    useAuthStore.getState().setSession(token, profile)
+    useAuthStore.getState().setSession(token, profile, displayName)
     onClose()
   }
 
@@ -233,6 +286,8 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
     const password = String(formData.get('auth-password') ?? '')
 
     if (isSignup) {
+      const username = String(formData.get('signup-username') ?? '').trim()
+      if (username.length < 3) next['signup-username'] = 'At least 3 characters.'
       if (password.length < 8) next['auth-password'] = 'Use at least 8 characters.'
       const confirm = String(formData.get('signup-confirm') ?? '')
       if (!next['auth-password'] && confirm !== password) {
@@ -248,6 +303,7 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
       if (isSignup) {
         await requestSignupOtp(email, password, String(formData.get('signup-confirm') ?? ''))
         pendingPasswordRef.current = password
+        pendingUsernameRef.current = String(formData.get('signup-username') ?? '').trim()
         setPendingEmail(email)
         switchTo('signup-otp')
       } else {
@@ -278,7 +334,7 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
     setSubmitting(true)
     try {
       const token = await verifySignupOtp(pendingEmail, otp)
-      await finishSession(token)
+      await finishSession(token, pendingUsernameRef.current)
     } catch (err) {
       if (!applyServerFieldErrors(err, { otp: 'signup-otp', email: 'auth-email' }, setFieldErrors)) {
         setFormError(toMessage(err))
@@ -583,19 +639,15 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
                 inputRef={resetOtpRef}
               />
               <div className="grid grid-cols-2 gap-3">
-                <Field
+                <PasswordField
                   label="New password"
                   id="reset-password"
-                  type="password"
-                  placeholder="••••••••"
                   autoComplete="new-password"
                   error={fieldErrors['reset-password']}
                 />
-                <Field
+                <PasswordField
                   label="Confirm"
                   id="reset-confirm"
-                  type="password"
-                  placeholder="••••••••"
                   autoComplete="new-password"
                   error={fieldErrors['reset-confirm']}
                 />
@@ -628,6 +680,16 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
             </p>
 
             <form onSubmit={handleLoginSignup} className="mt-3 space-y-3" noValidate>
+              {isSignup && (
+                <Field
+                  label="Username"
+                  id="signup-username"
+                  placeholder="octocat"
+                  autoComplete="username"
+                  hint="How you'll appear across the app."
+                  error={fieldErrors['signup-username']}
+                />
+              )}
               <Field
                 label="Email"
                 id="auth-email"
@@ -637,20 +699,16 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
                 error={fieldErrors['auth-email']}
                 inputRef={loginTabRef}
               />
-              <Field
+              <PasswordField
                 label="Password"
                 id="auth-password"
-                type="password"
-                placeholder="••••••••"
                 autoComplete={isSignup ? 'new-password' : 'current-password'}
                 error={fieldErrors['auth-password']}
               />
               {isSignup && (
-                <Field
+                <PasswordField
                   label="Confirm password"
                   id="signup-confirm"
-                  type="password"
-                  placeholder="••••••••"
                   autoComplete="new-password"
                   error={fieldErrors['signup-confirm']}
                 />
