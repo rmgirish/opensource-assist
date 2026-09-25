@@ -127,38 +127,6 @@ export function ownerAsContributor(fullName: string, avatarUrl: string): Contrib
   ]
 }
 
-export interface SearchResponse {
-  total_count: number
-  items: Repo[]
-}
-
-/**
- * Global top repositories: the three most-starred actively-maintained repos
- * on GitHub, dynamically filtering for recent commits.
- */
-export async function searchProjects(signal?: AbortSignal): Promise<SearchResponse> {
-  const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
-  const query = `stars:>10000 pushed:>${oneYearAgo}`
-  const url =
-    `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}` +
-    `&sort=stars&order=desc&per_page=3`
-
-  const res = await fetch(url, {
-    signal,
-    headers: { Accept: 'application/vnd.github+json' },
-  })
-
-  if (res.status === 403 || res.status === 429) {
-    throw new RateLimitError('GitHub API rate limit reached. Wait a minute and try again.')
-  }
-  if (!res.ok) {
-    throw new Error(`GitHub API error (${res.status}). Please try again.`)
-  }
-
-  const data = (await res.json()) as SearchResponse
-  return data
-}
-
 export function formatCount(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`
   return String(n)
