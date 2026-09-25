@@ -1,10 +1,20 @@
 import * as React from 'react'
-import { ArrowLeft, ArrowRight, Check, GitBranch, KeyRound, LogIn, UserPlus } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, GitBranch, KeyRound, LogIn, MailCheck, UserPlus } from 'lucide-react'
 import { Dialog, Button, Input } from '@/components/ui'
+import {
+  AuthApiError,
+  BackendUnavailableError,
+  fetchProfile,
+  login as apiLogin,
+  requestPasswordReset,
+  requestSignupOtp,
+  resetPassword,
+  verifySignupOtp,
+} from '@/lib/auth-api'
 import { useAuthStore } from '@/lib/auth-store'
 
 export type AuthMode = 'login' | 'signup'
-export type AuthScreen = AuthMode | 'forgot'
+export type AuthScreen = AuthMode | 'signup-otp' | 'forgot' | 'reset-otp'
 
 export interface AuthDialogProps {
   open: boolean
@@ -12,6 +22,8 @@ export interface AuthDialogProps {
   /** Which tab is shown when the dialog opens. */
   initialMode?: AuthMode
 }
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 function Field(props: {
   label: string
@@ -49,73 +61,272 @@ function Field(props: {
   )
 }
 
+function OtpField(props: {
+  label: string
+  id: string
+  email: string
+  onResend: () => void
+  resending: boolean
+  error?: string | null
+  inputRef?: React.Ref<HTMLInputElement>
+}) {
+  return (
+    <div className="space-y-1">
+      <label htmlFor={props.id} className="block text-[11px] font-semibold text-foreground">
+        {props.label}
+      </label>
+      <Input
+        ref={props.inputRef}
+        id={props.id}
+        name={props.id}
+        type="text"
+        inputMode="numeric"
+        pattern="\d{6}"
+        maxLength={6}
+        autoComplete="one-time-code"
+        placeholder="000000"
+        required
+        error={props.error}
+        className="text-center font-mono text-lg tracking-[0.5em]"
+      />
+      <p className="text-[11px] leading-snug text-muted-foreground">
+        Sent to <span className="font-semibold text-foreground">{props.email}</span> · expires in 5
+        minutes.{' '}
+        <button
+          type="button"
+          onClick={props.onResend}
+          disabled={props.resending}
+          className="font-medium text-accent-text hover:underline disabled:opacity-50"
+        >
+          {props.resending ? 'Sending…' : 'Resend code'}
+        </button>
+      </p>
+      {props.error && (
+        <p className="animate-fade-in text-[11px] font-medium text-accent-text">{props.error}</p>
+      )}
+    </div>
+  )
+}
+
+function FormError({ message }: { message: string | null }) {
+  if (!message) return null
+  return (
+    <p role="alert" className="animate-fade-in text-[11px] font-medium text-accent-text">
+      {message}
+    </p>
+  )
+}
+
 export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogProps) {
   const [screen, setScreen] = React.useState<AuthScreen>(initialMode)
-  const [errors, setErrors] = React.useState<Record<string, string>>({})
+  const [fieldErrors, setFieldErrors] = React.useState<Record<string, string>>({})
+  const [formError, setFormError] = React.useState<string | null>(null)
+  const [submitting, setSubmitting] = React.useState(false)
+  const [resending, setResending] = React.useState(false)
+
+  /** Email the OTP screens operate on. */
+  const [pendingEmail, setPendingEmail] = React.useState('')
+  /** Kept in memory (never persisted) so "resend code" can re-issue the signup OTP. */
+  const pendingPasswordRef = React.useRef<string>('')
+
+  /** Forgot-password flow state. */
   const [sentTo, setSentTo] = React.useState<string | null>(null)
-  const [showSent, setShowSent] = React.useState(false)
+  const [resetComplete, setResetComplete] = React.useState(false)
+
+  const loginTabRef = React.useRef<HTMLInputElement>(null)
+  const otpRef = React.useRef<HTMLInputElement>(null)
+  const resetOtpRef = React.useRef<HTMLInputElement>(null)
 
   // Reset to the requested tab every time the dialog opens.
   React.useEffect(() => {
     if (open) {
       setScreen(initialMode)
-      setErrors({})
+      setFieldErrors({})
+      setFormError(null)
+      setSubmitting(false)
+      setPendingEmail('')
+      pendingPasswordRef.current = ''
       setSentTo(null)
+      setResetComplete(false)
     }
   }, [open, initialMode])
 
+  // Move focus to the first input of the active screen.
+  React.useEffect(() => {
+    if (!open) return
+    if (screen === 'signup-otp') otpRef.current?.focus()
+    else if (screen === 'reset-otp') resetOtpRef.current?.focus()
+    else if (screen !== 'forgot') loginTabRef.current?.focus()
+  }, [open, screen])
+
   const isLogin = screen === 'login'
   const isSignup = screen === 'signup'
+  const isTabScreen = screen === 'login' || screen === 'signup'
 
-  const validate = (formData: FormData): boolean => {
+  const switchTo = (next: AuthScreen) => {
+    setFieldErrors({})
+    setFormError(null)
+    setScreen(next)
+  }
+
+  const finishSession = async (token: string) => {
+    const profile = await fetchProfile(token)
+    useAuthStore.getState().setSession(token, profile)
+    onClose()
+  }
+
+  const toMessage = (err: unknown): string => {
+    if (err instanceof AuthApiError || err instanceof BackendUnavailableError) return err.message
+    if (err instanceof Error) return err.message
+    return 'Something went wrong. Please try again.'
+  }
+
+  const handleLoginSignup = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    const formData = new FormData(e.currentTarget)
     const next: Record<string, string> = {}
+    setFormError(null)
+
+    const email = String(formData.get('auth-email') ?? '').trim()
+    if (!EMAIL_PATTERN.test(email)) next['auth-email'] = 'Enter a valid email address.'
+
+    const password = String(formData.get('auth-password') ?? '')
 
     if (isSignup) {
-      const username = String(formData.get('signup-username') ?? '').trim()
-      if (username.length < 3) next['signup-username'] = 'At least 3 characters.'
-
-      const password = String(formData.get('signup-password') ?? '')
+      if (password.length < 8) next['auth-password'] = 'Use at least 8 characters.'
       const confirm = String(formData.get('signup-confirm') ?? '')
-      if (password.length < 8) {
-        next['signup-password'] = 'Use at least 8 characters.'
-      } else if (confirm !== password) {
+      if (!next['auth-password'] && confirm !== password) {
         next['signup-confirm'] = "Passwords don't match."
       }
     }
 
-    setErrors(next)
-    return Object.keys(next).length === 0
-  }
+    setFieldErrors(next)
+    if (Object.keys(next).length > 0) return
 
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    const formData = new FormData(e.currentTarget)
-    if (!validate(formData)) return
-
-    // Simulated auth (no backend yet): store the session and enter the dashboard.
-    if (screen === 'signup') {
-      const username = String(formData.get('signup-username') ?? '').trim()
-      const email = String(formData.get('signup-email') ?? '').trim()
-      useAuthStore.getState().signup(username, email)
-    } else {
-      const email = String(formData.get('login-email') ?? '').trim()
-      useAuthStore.getState().login(email)
+    setSubmitting(true)
+    try {
+      if (isSignup) {
+        await requestSignupOtp(email, password, String(formData.get('signup-confirm') ?? ''))
+        pendingPasswordRef.current = password
+        setPendingEmail(email)
+        switchTo('signup-otp')
+      } else {
+        const token = await apiLogin(email, password)
+        await finishSession(token)
+      }
+    } catch (err) {
+      setFormError(toMessage(err))
+    } finally {
+      setSubmitting(false)
     }
-    onClose()
   }
 
-  const handleForgot = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSignupOtp = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    const email = new FormData(e.currentTarget).get('forgot-email') as string
-    setSentTo(email)
-    setShowSent(true)
+    const otp = String(new FormData(e.currentTarget).get('signup-otp') ?? '').trim()
+    setFormError(null)
+    if (!/^\d{6}$/.test(otp)) {
+      setFieldErrors({ 'signup-otp': 'Enter the 6-digit code from your email.' })
+      return
+    }
+    setFieldErrors({})
+    setSubmitting(true)
+    try {
+      const token = await verifySignupOtp(pendingEmail, otp)
+      await finishSession(token)
+    } catch (err) {
+      setFormError(toMessage(err))
+    } finally {
+      setSubmitting(false)
+    }
   }
 
-  const switchTo = (next: AuthScreen) => {
-    setErrors({})
+  const handleResendSignupOtp = async () => {
+    if (!pendingEmail) return
+    setResending(true)
+    setFormError(null)
+    try {
+      await requestSignupOtp(pendingEmail, pendingPasswordRef.current, pendingPasswordRef.current)
+    } catch (err) {
+      setFormError(toMessage(err))
+    } finally {
+      setResending(false)
+    }
+  }
+
+  const handleForgot = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    const email = String(new FormData(e.currentTarget).get('forgot-email') ?? '').trim()
+    setFormError(null)
+    if (!EMAIL_PATTERN.test(email)) {
+      setFieldErrors({ 'forgot-email': 'Enter a valid email address.' })
+      return
+    }
+    setFieldErrors({})
+    setSubmitting(true)
+    try {
+      await requestPasswordReset(email)
+      setSentTo(email)
+      // Stay on 'forgot': the success panel renders via the forgotSent flag.
+    } catch (err) {
+      setFormError(toMessage(err))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const forgotSent = screen === 'forgot' && sentTo !== null
+
+  const handleResetOtp = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    if (!sentTo) return
+    const formData = new FormData(e.currentTarget)
+    const otp = String(formData.get('reset-otp') ?? '').trim()
+    const newPassword = String(formData.get('reset-password') ?? '')
+    const confirm = String(formData.get('reset-confirm') ?? '')
+    setFormError(null)
+
+    const next: Record<string, string> = {}
+    if (!/^\d{6}$/.test(otp)) next['reset-otp'] = 'Enter the 6-digit reset code.'
+    if (newPassword.length < 8) next['reset-password'] = 'Use at least 8 characters.'
+    else if (confirm !== newPassword) next['reset-confirm'] = "Passwords don't match."
+    setFieldErrors(next)
+    if (Object.keys(next).length > 0) return
+
+    setSubmitting(true)
+    try {
+      await resetPassword(sentTo, otp, newPassword)
+      setResetComplete(true)
+    } catch (err) {
+      setFormError(toMessage(err))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleResendResetOtp = async () => {
+    if (!sentTo) return
+    setResending(true)
+    setFormError(null)
+    try {
+      await requestPasswordReset(sentTo)
+    } catch (err) {
+      setFormError(toMessage(err))
+    } finally {
+      setResending(false)
+    }
+  }
+
+  const switchToForgot = () => {
     setSentTo(null)
-    setShowSent(false)
-    setScreen(next)
+    setResetComplete(false)
+    switchTo('forgot')
+  }
+
+  const switchToLogin = () => {
+    setSentTo(null)
+    setResetComplete(false)
+    switchTo('login')
   }
 
   return (
@@ -123,17 +334,23 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
       open={open}
       onClose={onClose}
       ariaLabel={
-        screen === 'forgot'
-          ? 'Reset your password'
-          : isLogin
-            ? 'Log in to OpenSource Assist'
-            : 'Create your OpenSource Assist account'
+        screen === 'signup-otp'
+          ? 'Verify your email'
+          : screen === 'reset-otp'
+            ? 'Set a new password'
+            : forgotSent
+              ? 'Check your inbox'
+              : screen === 'forgot'
+                ? 'Reset your password'
+                : isLogin
+                  ? 'Log in to OpenSource Assist'
+                  : 'Create your OpenSource Assist account'
       }
       className="sm:max-h-[calc(100dvh-2.5rem)]"
     >
       <div className="auth-body p-5 sm:p-6">
-        {/* Tab switcher — hidden while the forgot-password screen is open */}
-        {screen !== 'forgot' && (
+        {/* Tab switcher — only on the two main tabs */}
+        {isTabScreen && (
           <div
             role="tablist"
             aria-label="Authentication mode"
@@ -170,18 +387,77 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
           </div>
         )}
 
+        {/* Signup OTP verification */}
+        {screen === 'signup-otp' && (
+          <div key="signup-otp" className="animate-fade-up">
+            <button
+              type="button"
+              onClick={() => switchTo('signup')}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-accent-text"
+            >
+              <ArrowLeft className="size-3.5" aria-hidden="true" />
+              Change email
+            </button>
+            <h2 className="mt-4 flex items-center gap-2 text-xl font-bold tracking-tight">
+              <MailCheck className="size-5 text-accent-text" aria-hidden="true" />
+              Verify your email
+            </h2>
+            <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+              One last step — enter the 6-digit code we emailed you to activate your account.
+            </p>
+            <form onSubmit={handleSignupOtp} className="mt-5 space-y-4" noValidate>
+              <OtpField
+                label="Verification code"
+                id="signup-otp"
+                email={pendingEmail}
+                onResend={handleResendSignupOtp}
+                resending={resending}
+                error={fieldErrors['signup-otp']}
+                inputRef={otpRef}
+              />
+              <FormError message={formError} />
+              <Button type="submit" className="h-9 w-full" disabled={submitting}>
+                {submitting ? 'Verifying…' : 'Verify & create account'}
+                {!submitting && <ArrowRight className="size-4" aria-hidden="true" />}
+              </Button>
+            </form>
+          </div>
+        )}
+
         {/* Forgot-password success state */}
-        {screen === 'forgot' && showSent && (
+        {forgotSent && !resetComplete && (
           <div key="sent" className="animate-fade-up py-8 text-center">
             <span className="mx-auto flex size-14 items-center justify-center rounded-full bg-accent/15 text-accent-text">
               <Check className="size-7" aria-hidden="true" />
             </span>
             <h2 className="mt-5 text-xl font-bold tracking-tight">Check your inbox</h2>
             <p className="mx-auto mt-2 max-w-[38ch] text-sm leading-relaxed text-muted-foreground">
-              We sent a reset link to <span className="font-semibold text-foreground">{sentTo}</span>.
-              It expires in 30 minutes.
+              If an account exists for <span className="font-semibold text-foreground">{sentTo}</span>,
+              a reset code is on its way. It expires in 5 minutes.
             </p>
-            <Button variant="secondary" size="sm" className="mt-6" onClick={() => switchTo('login')}>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="mt-6"
+              onClick={() => switchTo('reset-otp')}
+            >
+              Enter reset code
+              <ArrowRight className="size-4" aria-hidden="true" />
+            </Button>
+          </div>
+        )}
+
+        {/* Reset success state */}
+        {forgotSent && resetComplete && (
+          <div key="reset-done" className="animate-fade-up py-8 text-center">
+            <span className="mx-auto flex size-14 items-center justify-center rounded-full bg-accent/15 text-accent-text">
+              <Check className="size-7" aria-hidden="true" />
+            </span>
+            <h2 className="mt-5 text-xl font-bold tracking-tight">Password updated</h2>
+            <p className="mx-auto mt-2 max-w-[38ch] text-sm leading-relaxed text-muted-foreground">
+              Your password has been reset. Log in with your new password.
+            </p>
+            <Button variant="secondary" size="sm" className="mt-6" onClick={switchToLogin}>
               <ArrowLeft className="size-4" aria-hidden="true" />
               Back to log in
             </Button>
@@ -189,11 +465,11 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
         )}
 
         {/* Forgot-password form */}
-        {screen === 'forgot' && !showSent && (
+        {screen === 'forgot' && !forgotSent && (
           <div key="forgot" className="animate-fade-up">
             <button
               type="button"
-              onClick={() => switchTo('login')}
+              onClick={switchToLogin}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-accent-text"
             >
               <ArrowLeft className="size-3.5" aria-hidden="true" />
@@ -204,26 +480,80 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
               Reset your password
             </h2>
             <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-              Enter the email you signed up with and we'll send you a reset link.
+              Enter the email you signed up with and we'll send you a 6-digit reset code.
             </p>
-            <form onSubmit={handleForgot} className="mt-5 space-y-4">
+            <form onSubmit={handleForgot} className="mt-5 space-y-4" noValidate>
               <Field
                 label="Email"
                 id="forgot-email"
                 type="email"
                 placeholder="you@example.com"
                 autoComplete="email"
+                error={fieldErrors['forgot-email']}
               />
-              <Button type="submit" className="w-full">
-                Send reset link
-                <ArrowRight className="size-4" aria-hidden="true" />
+              <FormError message={formError} />
+              <Button type="submit" className="w-full" disabled={submitting}>
+                {submitting ? 'Sending…' : 'Send reset code'}
+                {!submitting && <ArrowRight className="size-4" aria-hidden="true" />}
+              </Button>
+            </form>
+          </div>
+        )}
+
+        {/* Reset OTP form */}
+        {screen === 'reset-otp' && sentTo && (
+          <div key="reset-otp" className="animate-fade-up">
+            <button
+              type="button"
+              onClick={switchToForgot}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-accent-text"
+            >
+              <ArrowLeft className="size-3.5" aria-hidden="true" />
+              Use a different email
+            </button>
+            <h2 className="mt-4 flex items-center gap-2 text-xl font-bold tracking-tight">
+              <KeyRound className="size-5 text-accent-text" aria-hidden="true" />
+              Set a new password
+            </h2>
+            <form onSubmit={handleResetOtp} className="mt-5 space-y-4" noValidate>
+              <OtpField
+                label="Reset code"
+                id="reset-otp"
+                email={sentTo}
+                onResend={handleResendResetOtp}
+                resending={resending}
+                error={fieldErrors['reset-otp']}
+                inputRef={resetOtpRef}
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <Field
+                  label="New password"
+                  id="reset-password"
+                  type="password"
+                  placeholder="••••••••"
+                  autoComplete="new-password"
+                  error={fieldErrors['reset-password']}
+                />
+                <Field
+                  label="Confirm"
+                  id="reset-confirm"
+                  type="password"
+                  placeholder="••••••••"
+                  autoComplete="new-password"
+                  error={fieldErrors['reset-confirm']}
+                />
+              </div>
+              <FormError message={formError} />
+              <Button type="submit" className="h-9 w-full" disabled={submitting}>
+                {submitting ? 'Saving…' : 'Reset password'}
+                {!submitting && <ArrowRight className="size-4" aria-hidden="true" />}
               </Button>
             </form>
           </div>
         )}
 
         {/* Login / signup tabpanel */}
-        {isForgotScreen(screen) && (
+        {isTabScreen && (
           <div
             key={screen}
             id="panel-auth"
@@ -237,66 +567,43 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
             <p className="auth-desc mt-0.5 text-sm leading-relaxed text-muted-foreground">
               {isLogin
                 ? 'Log in to track quests, badges and your roadmap.'
-                : 'Join free — save favorite repos and track your first merged PR.'}
+                : 'Join free — we email you a code to verify your address.'}
             </p>
 
-            <form onSubmit={handleSubmit} className="mt-3 space-y-3" noValidate>
-              {isSignup && (
-                <Field
-                  label="Username"
-                  id="signup-username"
-                  placeholder="octocat"
-                  autoComplete="username"
-                  error={errors['signup-username']}
-                />
-              )}
+            <form onSubmit={handleLoginSignup} className="mt-3 space-y-3" noValidate>
               <Field
                 label="Email"
-                id={`${screen}-email`}
+                id="auth-email"
                 type="email"
                 placeholder="you@example.com"
                 autoComplete="email"
-                error={errors[`${screen}-email`]}
+                error={fieldErrors['auth-email']}
+                inputRef={loginTabRef}
               />
-              {isSignup ? (
-                <div className="grid grid-cols-2 gap-3">
-                  <Field
-                    label="Password"
-                    id={`${screen}-password`}
-                    type="password"
-                    placeholder="••••••••"
-                    autoComplete="new-password"
-                    error={errors[`${screen}-password`]}
-                  />
-                  <Field
-                    label="Confirm"
-                    id="signup-confirm"
-                    type="password"
-                    placeholder="••••••••"
-                    autoComplete="new-password"
-                    error={errors['signup-confirm']}
-                  />
-                </div>
-              ) : (
+              <Field
+                label="Password"
+                id="auth-password"
+                type="password"
+                placeholder="••••••••"
+                autoComplete={isSignup ? 'new-password' : 'current-password'}
+                error={fieldErrors['auth-password']}
+              />
+              {isSignup && (
                 <Field
-                  label="Password"
-                  id={`${screen}-password`}
+                  label="Confirm password"
+                  id="signup-confirm"
                   type="password"
                   placeholder="••••••••"
-                  autoComplete="current-password"
-                  error={errors[`${screen}-password`]}
+                  autoComplete="new-password"
+                  error={fieldErrors['signup-confirm']}
                 />
               )}
 
               {isLogin && (
-                <div className="flex items-center justify-between">
-                  <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                    <input type="checkbox" className="size-3.5 rounded accent-accent" />
-                    Remember me
-                  </label>
+                <div className="flex items-center justify-end">
                   <button
                     type="button"
-                    onClick={() => switchTo('forgot')}
+                    onClick={switchToForgot}
                     className="text-xs font-medium text-accent-text hover:underline"
                   >
                     Forgot password?
@@ -319,9 +626,17 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
                 </p>
               )}
 
-              <Button type="submit" className="h-9 w-full">
-                {isLogin ? 'Log in' : 'Create account'}
-                <ArrowRight className="size-4" aria-hidden="true" />
+              <FormError message={formError} />
+
+              <Button type="submit" className="h-9 w-full" disabled={submitting}>
+                {submitting
+                  ? isSignup
+                    ? 'Sending code…'
+                    : 'Logging in…'
+                  : isLogin
+                    ? 'Log in'
+                    : 'Send verification code'}
+                {!submitting && <ArrowRight className="size-4" aria-hidden="true" />}
               </Button>
             </form>
 
@@ -354,17 +669,12 @@ export function AuthDialog({ open, onClose, initialMode = 'login' }: AuthDialogP
       {/* Footer strip */}
       <div className="auth-footer border-t border-border px-6 py-2.5 sm:px-7">
         <p className="flex items-center justify-between font-mono text-[10px] text-muted-foreground">
-          <span>credentials never leave your browser</span>
-          <span className="text-accent-text">v1.0</span>
+          <span>email-verified accounts · JWT sessions</span>
+          <span className="text-accent-text">v2.0</span>
         </p>
       </div>
     </Dialog>
   )
 }
 
-function isForgotScreen(screen: AuthScreen): screen is 'login' | 'signup' {
-  return screen !== 'forgot'
-}
-
 export default AuthDialog
-
